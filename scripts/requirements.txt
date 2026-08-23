@@ -1,0 +1,4 @@
+pyzipper>=0.3
+img2pdf>=0.5
+Pillow>=9.0
+rarfile>=4.0
