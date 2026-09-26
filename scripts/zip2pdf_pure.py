@@ -272,12 +272,38 @@ _NAT_RE = re.compile(r"(\d+)")
 
 
 def _category_key(stem: str) -> int:
+    """
+    按前缀判定页面分类。约定（与 SKILL.md 一致）：
+
+        封面(fcov/cov) -> 书脊(bok) -> 勒口(leg) -> 前言(pre/bok0) ->
+        序(fow) -> 目录(dir/toc) -> 凡例(dat) -> 正文(数字) -> 附录(att) -> 封底(bak)
+
+    需要区别对待的三个特例键：
+      * bok0   —— 只要以 bok0 开头就归前言（bok001 / bok010 都是前言）
+      * cov0   —— 只有文件名恰好是 cov0 才算封底，避免 cov001 被误判成封底
+      * !000   —— 勒口，lstrip("!") 后等价于 000，由普通前缀处理
+
+    普通前缀命中要求：前缀之后的剩余部分为空或纯数字。
+    """
     candidate = stem.lower().lstrip("!")
+
+    # bok0：以 bok0 开头一律算前言
+    if candidate.startswith("bok0"):
+        return _CATEGORY_ORDER["bok0"]
+
+    # cov0：仅当文件名正好是 cov0 时才是封底特例；cov001 走下面的普通 cov 前缀 -> 封面
+    if candidate == "cov0":
+        return _CATEGORY_ORDER["cov0"]
+
     for prefix, order in sorted(_CATEGORY_ORDER.items(), key=lambda x: -len(x[0])):
-        if candidate.startswith(prefix):
+        if prefix in ("bok0", "cov0"):
+            continue
+        if not candidate.startswith(prefix):
+            continue
+        rest = candidate[len(prefix):]
+        if rest == "" or rest.isdigit():
             return order
-    if candidate[:1].isdigit():
-        return 7
+    # 没命中任何分类的，一律当正文处理（正文页就是纯数字命名）
     return 7
 
 
@@ -320,23 +346,36 @@ def normalize_extracted_folder(root: Path) -> Path:
     return root
 
 # ---------- ZIP 解压（含密码尝试） ----------
-def _fix_zip_name(name: str) -> str:
-    """修复 ZIP 中文文件名乱码（CP437 -> GB18030）。"""
+def _fix_zip_name(name: str, flag_bits: int = 0) -> str:
+    """
+    修复 ZIP 中文文件名乱码（CP437 -> GB18030）。
+
+    只在文件名的 UTF-8 标志位（0x800）未设置时才做转换，避免把本来就是
+    正确 UTF-8/Unicode 的名字（如 café.jpg、Ω.jpg）二次破坏。
+    转换失败或结果可疑时原样返回。
+    """
+    if flag_bits & 0x800:          # 压缩包已声明是 UTF-8，直接信任
+        return name
+    if not name:
+        return name
     try:
-        if name and all(ord(ch) < 0x8000 for ch in name):
-            raw = name.encode("cp437")
-            try:
-                return raw.decode("gb18030")
-            except UnicodeDecodeError:
-                return raw.decode("utf-8", errors="replace")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
+        raw = name.encode("cp437")
+    except UnicodeEncodeError:
+        # 含无法用 cp437 表示的字符，说明原始名已是 Unicode，原样返回
+        return name
+    try:
+        fixed = raw.decode("gb18030")
+    except UnicodeDecodeError:
+        return name
+    # 只有当转换确实产生了变化、且没有解出替换字符时才采用
+    if fixed != name and "\ufffd" not in fixed:
+        return fixed
     return name
 
 
 def _zip_extract_all(zf: zipfile.ZipFile, dest: Path, pwd: Optional[bytes]) -> None:
     for member in zf.infolist():
-        member.filename = _fix_zip_name(member.filename)
+        member.filename = _fix_zip_name(member.filename, member.flag_bits)
         zf.extract(member, dest, pwd=pwd)
 
 
@@ -396,20 +435,24 @@ def _find_rar_tool() -> Tuple[str, bool]:
 
 
 def _run_extract(tool: str, is_unrar: bool, archive: Path, dest: Path,
-                 pwd: Optional[str]) -> int:
+                 pwd: Optional[str]) -> Tuple[int, str]:
+    """返回 (返回码, stderr 文本)。stderr 用于区分"密码不对"与"包损坏/格式不支持"。"""
     dest.mkdir(parents=True, exist_ok=True)
     if is_unrar:
         cmd = [tool, "x", str(archive), f"-o{dest}\\", "-y", "-inul"]
-        if pwd:
-            cmd.append(f"-p{pwd}")
-        else:
-            cmd.append("-p-")
+        cmd.append(f"-p{pwd}" if pwd else "-p-")
     else:
         cmd = [tool, "x", str(archive), f"-o{dest}", "-y"]
         if pwd:
             cmd.append(f"-p{pwd}")
     result = subprocess.run(cmd, capture_output=True)
-    return result.returncode
+    stderr = ""
+    if result.stderr:
+        try:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        except Exception:  # noqa: BLE001
+            stderr = str(result.stderr)
+    return result.returncode, stderr
 
 
 def extract_rar(archive: Path, dest: Path, pwds: Sequence[str]) -> Optional[str]:
@@ -425,7 +468,8 @@ def extract_rar(archive: Path, dest: Path, pwds: Sequence[str]) -> Optional[str]
     tool, is_unrar = _find_rar_tool()
 
     # 先试空密码 / 无密码
-    if _run_extract(tool, is_unrar, archive, dest, None) == 0:
+    rc, stderr = _run_extract(tool, is_unrar, archive, dest, None)
+    if rc == 0:
         return "-"
 
     # 清空目标目录再开始试密码（避免残留）
@@ -433,14 +477,23 @@ def extract_rar(archive: Path, dest: Path, pwds: Sequence[str]) -> Optional[str]
         shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
 
+    last_err = stderr
     for pwd in pwds:
-        rc = _run_extract(tool, is_unrar, archive, dest, pwd)
+        rc, stderr = _run_extract(tool, is_unrar, archive, dest, pwd)
         if rc == 0:
             return pwd
+        last_err = stderr or last_err
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
         dest.mkdir(parents=True, exist_ok=True)
-    raise RuntimeError("RAR 密码尝试全部失败，请补充密码表或手动解压")
+
+    # 区分"密码不对"和"包本身有问题"，避免误报让用户去补密码表
+    hint = ""
+    low = (last_err or "").lower()
+    if any(k in low for k in ("is not rar", "corrupt", "damaged", "unexpected end",
+                              "cannot open", "no files to extract", "unsupported")):
+        hint = f"（解压工具报错，可能是压缩包损坏或格式不支持：{last_err[:200]}）"
+    raise RuntimeError("RAR 密码尝试全部失败，请补充密码表或手动解压" + hint)
 
 # ---------- 组装 PDF ----------
 def _normalise_for_pdf(raw: bytes, fmt: str) -> bytes:
@@ -561,10 +614,9 @@ def convert_one(source: Path, work_root: Path, pwds: Sequence[str],
             result.note = "没有任何页面能被识别为图片"
             return result
 
-        output_pdf = source.with_suffix(".pdf") if source.is_file() \
-            else source.with_name(source.rstrip("\\/").split("\\")[-1] + ".pdf")
-        # 上面 source 是目录时更稳的写法：
-        if source.is_dir():
+        if source.is_file():
+            output_pdf = source.with_suffix(".pdf")
+        else:
             output_pdf = source.parent / (source.name + ".pdf")
 
         n = 0
@@ -591,18 +643,27 @@ def convert_one(source: Path, work_root: Path, pwds: Sequence[str],
 
 # ---------- 入口 ----------
 def _collect_inputs(paths: Sequence[str]) -> List[Path]:
+    """收集输入。传入目录时递归收集其中所有压缩包（与 gather_pages 的 rglob 行为保持一致）。"""
     items: List[Path] = []
     for raw in paths:
         p = Path(raw.strip().strip('"')).expanduser()
         if p.is_dir():
-            for child in sorted(p.iterdir()):
-                if child.suffix.lower() in ARCHIVE_EXTS:
+            for child in sorted(p.rglob("*")):
+                if child.is_file() and child.suffix.lower() in ARCHIVE_EXTS:
                     items.append(child)
         elif p.exists():
             items.append(p)
         else:
             err(f"[!] 路径不存在: {p}")
-    return items
+    # 去重，保持顺序
+    seen = set()
+    unique: List[Path] = []
+    for it in items:
+        key = str(it.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(it)
+    return unique
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -90,6 +90,38 @@ git clone https://github.com/weixiaokuan123/pdg-zip-to-pdf.git "$env:USERPROFILE
 
 装 7-Zip 加进 PATH，或者把 `UnRAR.exe` / `7z.exe` 放到脚本同级的 `7-Zip/` 目录。
 
+**页面顺序不对（封面跑到最后、书脊位置奇怪）**
+
+这是 v1.0.0 修掉的 bug。`cov001.pdg` 之前会被 `cov0` 前缀抢走判成封底，`bok001.pdg` 会被 `bok0` 抢走判成前言。命名规则现在是：
+
+- `bok0` 开头一律算**前言**（`bok001`、`bok010` 都是前言）；其余 `bok` 开头算**书脊**
+- 只有文件名正好是 `cov0` 才算封底特例，`cov001` 是**封面**
+
+**非中文的文件名（café.jpg、Ω.jpg）转完变乱码**
+
+v1.0.0 之前的文件名修复逻辑会把合法的 UTF-8 名字二次破坏。现在只在压缩包没声明 UTF-8 时才做 CP437→GB18030 转换。
+
+## 测试
+
+```bash
+cd scripts
+python test_regression.py
+```
+
+覆盖页面分类、文件名修复、PDG 解包和一次端到端转换。需要 `pip install pypdf` 才能校验 PDF 页数，没装会自动跳过那一项。
+
+## 更新日志
+
+**v1.0.0**
+
+- 修复 `cov001.pdg` 被误判为封底、导致封面排到全书最后的问题
+- 修复 `bok001.pdg` 被误判为前言的问题（现在 `bok0` 开头才算是前言）
+- 修复合法 UTF-8 文件名（如 `café.jpg`、`Ω.jpg`）被乱码化的问题
+- 传目录时会递归收集子目录里的压缩包，不再只扫第一层
+- RAR 解压失败时会区分"密码不对"和"压缩包损坏/格式不支持"，不再一律报密码问题
+- 删除了一段永远不会生效的输出文件名判断代码
+- 新增回归测试 `scripts/test_regression.py`
+
 ## 许可证
 
 代码用 MIT。`scripts/passwords/passwords.txt` 来自互联网公开收集，版权归原作者；`7-Zip/` 里的二进制不随仓库分发，需要的话自己去 [7-zip.org](https://www.7-zip.org/) 或 [rarlab.com](https://www.rarlab.com/) 下。
