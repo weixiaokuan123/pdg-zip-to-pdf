@@ -259,14 +259,20 @@ def extract_page_data(raw: bytes) -> Tuple[bytes, str]:
 _CATEGORY_ORDER = {
     "fcov": 0, "cov": 0,
     "bok": 1,
-    "leg": 2, "!000": 2,
+    "leg": 2,
     "pre": 3, "bok0": 3,
     "fow": 4, "foreword": 4,
-    "dir": 5, "toc": 5, "!toc": 5,
+    "dir": 5, "toc": 5,
     "dat": 6,
     "000": 7,
     "att": 8, "add": 8,
     "bak": 9, "cov0": 9,
+}
+# 以 "!" 开头的超星命名单独处理：!0000x 是目录页，!toc 是目录，
+# 它们必须在剥掉 "!" 之前判定，否则 !00001 会退化成 00001 被当正文。
+_BANG_CATEGORY = {
+    "!000": 5,   # 目录（实测 !00001~!00004 就是目录页）
+    "!toc": 5,
 }
 _NAT_RE = re.compile(r"(\d+)")
 
@@ -276,16 +282,28 @@ def _category_key(stem: str) -> int:
     按前缀判定页面分类。约定（与 SKILL.md 一致）：
 
         封面(fcov/cov) -> 书脊(bok) -> 勒口(leg) -> 前言(pre/bok0) ->
-        序(fow) -> 目录(dir/toc) -> 凡例(dat) -> 正文(数字) -> 附录(att) -> 封底(bak)
+        序(fow) -> 目录(dir/toc/!000) -> 凡例(dat) -> 正文(数字) -> 附录(att) -> 封底(bak)
 
-    需要区别对待的三个特例键：
+    需要区别对待的特例：
+      * !000 / !toc —— 以 "!" 开头，必须在剥掉 "!" 之前判定，否则会退化成
+        正文的 "000" 前缀，被排到全书最后
       * bok0   —— 只要以 bok0 开头就归前言（bok001 / bok010 都是前言）
       * cov0   —— 只有文件名恰好是 cov0 才算封底，避免 cov001 被误判成封底
-      * !000   —— 勒口，lstrip("!") 后等价于 000，由普通前缀处理
 
     普通前缀命中要求：前缀之后的剩余部分为空或纯数字。
     """
-    candidate = stem.lower().lstrip("!")
+    raw = stem.lower()
+
+    # "!" 开头的命名先单独判定（不能先 lstrip）
+    if raw.startswith("!"):
+        for prefix, order in sorted(_BANG_CATEGORY.items(), key=lambda x: -len(x[0])):
+            if raw.startswith(prefix):
+                rest = raw[len(prefix):]
+                if rest == "" or rest.isdigit():
+                    return order
+        # 其余 !xxx 去掉感叹号后按普通规则处理（如 !0000x 已在上面返回）
+
+    candidate = raw.lstrip("!")
 
     # bok0：以 bok0 开头一律算前言
     if candidate.startswith("bok0"):
@@ -296,7 +314,7 @@ def _category_key(stem: str) -> int:
         return _CATEGORY_ORDER["cov0"]
 
     for prefix, order in sorted(_CATEGORY_ORDER.items(), key=lambda x: -len(x[0])):
-        if prefix in ("bok0", "cov0"):
+        if prefix in ("bok0", "cov0", "!000", "!toc"):
             continue
         if not candidate.startswith(prefix):
             continue

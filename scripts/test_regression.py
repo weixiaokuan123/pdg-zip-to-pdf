@@ -43,6 +43,8 @@ CASES = [
     ("leg001", 2), ("pre001", 3), ("fow001", 4),
     ("dir001", 5), ("toc001", 5), ("dat001", 6),
     ("000001", 7), ("att001", 8), ("add001", 8),
+    # "!" 开头的超星命名：!0000x 是目录，不能退化成正文
+    ("!00001", 5), ("!00004", 5), ("!000", 5), ("!toc", 5),
 ]
 for stem, expect in CASES:
     got = _category_key(stem)
@@ -62,6 +64,15 @@ check(got == expect, "封面在最前 / 自然排序正确", f"实际 {got}")
 check(_category_key("cov001") == 0, "cov001 归类为封面(0)，不是封底(9)")
 check(_category_key("bok001") == 3, "bok001 归类为前言(3)")
 check(_category_key("bok1") == 1, "bok1 归类为书脊(1)")
+
+# 真实读秀包（13059200_像工程师那样思考）暴露的问题：!0000x 是目录，不能排到最后
+check(_category_key("!00001") == 5, "!00001 归类为目录(5)，不是正文(7)")
+bang_book = ["cov001.pdg", "leg001.pdg", "bok001.pdg", "fow001.pdg",
+             "!00001.pdg", "!00004.pdg", "000001.pdg", "000320.pdg"]
+got_bang = sorted(bang_book, key=natural_sort_key)
+expect_bang = ["cov001.pdg", "leg001.pdg", "bok001.pdg", "fow001.pdg",
+               "!00001.pdg", "!00004.pdg", "000001.pdg", "000320.pdg"]
+check(got_bang == expect_bang, "!0000x 目录排在序之后、正文之前", f"实际 {got_bang}")
 
 
 # ---------------------------------------------------------------- 中文名修复
